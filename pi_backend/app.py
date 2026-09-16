@@ -512,14 +512,18 @@ def handle_telemetry_impact(impact):
     )
 
     if effect_type == "kick":
-        severity = jerk / 10000.0
-        strength = min(FFB_MAX, max(FFB_MIN, severity * FFB_MULTIPLIER))
-        try:
-            ffb.set_hardware_autocenter(strength)
-        except Exception: pass
-        timer = threading.Timer(FFB_KICK_DURATION, _release_cockpit_impact_ffb, args=(matched_cockpit_id,))
-        timer.daemon = True
-        timer.start()
+        severity = jerk / 50.0
+        strength = min(100.0, max(20.0, severity * 100.0))
+        # Use play_rumble to ensure it actually vibrates instead of just being stiff
+        if hasattr(ffb, 'play_rumble'):
+            ffb.play_rumble(500)
+        else:
+            try:
+                ffb.set_hardware_autocenter(strength)
+            except Exception: pass
+            timer = threading.Timer(FFB_KICK_DURATION, _release_cockpit_impact_ffb, args=(matched_cockpit_id,))
+            timer.daemon = True
+            timer.start()
     elif effect_type == "terrain":
         if hasattr(ffb, 'play_terrain'):
             ffb.play_terrain(500)
