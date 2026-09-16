@@ -5,14 +5,16 @@ import threading
 import time
 
 
-UDP_IP = "10.42.0.1"
+UDP_IP = "0.0.0.0"
 UDP_PORT = 5005
 
 PACKET_FORMAT = "<B6sI6f"
 PACKET_SIZE = struct.calcsize(PACKET_FORMAT)
 PACKET_TELEMETRY = 4
 
-JERK_THRESHOLD = 10000.0
+JERK_THRESHOLD = 2500.0
+TERRAIN_THRESHOLD = 800.0
+RUMBLE_THRESHOLD = 200.0
 IMPACT_COOLDOWN = 0.25
 
 
@@ -208,9 +210,16 @@ class TelemetryReceiver:
                     print(f"[Telemetry] Callback error: {exc}")
 
             if (
-                jerk >= JERK_THRESHOLD
+                jerk >= RUMBLE_THRESHOLD
                 and now - self.last_impact_time >= IMPACT_COOLDOWN
             ):
+                if jerk >= JERK_THRESHOLD:
+                    event["effect_type"] = "kick"
+                elif jerk >= TERRAIN_THRESHOLD:
+                    event["effect_type"] = "terrain"
+                else:
+                    event["effect_type"] = "rumble"
+
                 self.last_impact_time = now
                 with self._lock:
                     self.impact_count += 1

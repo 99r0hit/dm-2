@@ -503,36 +503,30 @@ def handle_telemetry_impact(impact):
         )
         return
 
+    effect_type = impact.get("effect_type", "kick")
     jerk = float(impact["jerk"])
-    print(jerk)
-    severity = jerk / 10000.0
-    strength = min(
-        FFB_MAX,
-        max(FFB_MIN, severity * FFB_MULTIPLIER)
-    )
 
     print(
-        f"[FFB] IMPACT → Cockpit {matched_cockpit_id} | "
-        f"vehicle={matched_vehicle_name} | RX={receiver_id} | "
-        f"source={source_ip} | jerk={jerk:.1f} | "
-        f"strength={strength:.1f}%"
+        f"[FFB] EVENT: {effect_type.upper()} → Cockpit {matched_cockpit_id} | "
+        f"vehicle={matched_vehicle_name} | jerk={jerk:.1f}"
     )
 
-    try:
-        ffb.set_hardware_autocenter(strength)
-    except Exception as exc:
-        print(
-            f"[FFB] Cockpit {matched_cockpit_id} kick error: {exc}"
-        )
-        return
+    if effect_type == "kick":
+        severity = jerk / 10000.0
+        strength = min(FFB_MAX, max(FFB_MIN, severity * FFB_MULTIPLIER))
+        try:
+            ffb.set_hardware_autocenter(strength)
+        except Exception: pass
+        timer = threading.Timer(FFB_KICK_DURATION, _release_cockpit_impact_ffb, args=(matched_cockpit_id,))
+        timer.daemon = True
+        timer.start()
+    elif effect_type == "terrain":
+        if hasattr(ffb, 'play_terrain'):
+            ffb.play_terrain(500)
+    elif effect_type == "rumble":
+        if hasattr(ffb, 'play_rumble'):
+            ffb.play_rumble(500)
 
-    timer = threading.Timer(
-        FFB_KICK_DURATION,
-        _release_cockpit_impact_ffb,
-        args=(matched_cockpit_id,)
-    )
-    timer.daemon = True
-    timer.start()
 
 
 telemetry_receiver = TelemetryReceiver(
@@ -607,7 +601,7 @@ def _remove_cockpit_ffb_instance(cockpit_id, expected=None):
 
 def set_autocenter_hardware(enabled: bool, cockpit_id=None):
     """Set hardware centering for one cockpit, or all active cockpit wheels."""
-    strength = 10 if enabled else 0
+    strength = 22 if enabled else 0
     print(f"Sagar")
 
     if cockpit_id is not None:
@@ -2489,6 +2483,34 @@ def connect():
     except Exception as e:
         return render_template("wifi_error.html", error=str(e), ssid=ssid)
 
+
+
+@app.route('/api/ffb_test', methods=['POST'])
+def ffb_test_api():
+    data = request.json or {}
+    cockpit_id = data.get('cockpit_id', 'cockpit1')
+    effect = data.get('effect', 'rumble')
+    
+    cockpit = cockpit_manager.get_cockpit(cockpit_id)
+    if not cockpit or not getattr(cockpit, 'wheel', None):
+        return jsonify({'error': 'Cockpit or wheel not found'}), 400
+        
+    ffb = get_ffb_device(cockpit_id)
+    if not ffb:
+        return jsonify({'error': 'FFB not initialized'}), 400
+        
+    if effect == 'rumble':
+        if hasattr(ffb, 'play_rumble'):
+            ffb.play_rumble(1000)
+    elif effect == 'terrain':
+        if hasattr(ffb, 'play_terrain'):
+            ffb.play_terrain(1000)
+    elif effect == 'kick':
+        ffb.set_hardware_autocenter(100.0)
+        import threading
+        threading.Timer(0.25, _release_cockpit_impact_ffb, args=(cockpit_id,)).start()
+        
+    return jsonify({'success': True, 'effect': effect})
 
 if __name__ == '__main__':
     initialize_cockpit_system()
