@@ -601,7 +601,7 @@ def _remove_cockpit_ffb_instance(cockpit_id, expected=None):
 
 def set_autocenter_hardware(enabled: bool, cockpit_id=None):
     """Set hardware centering for one cockpit, or all active cockpit wheels."""
-    strength = 22 if enabled else 0
+    strength = 0
     print(f"Sagar")
 
     if cockpit_id is not None:
@@ -1291,7 +1291,7 @@ def cockpit_control_worker(cockpit_id):
             if cockpit_id in cockpit_settings:
                 enabled = cockpit_settings[cockpit_id].get("autocenter_enabled", True)
         
-        ffb.set_hardware_autocenter(22 if enabled else 0)
+        ffb.set_hardware_autocenter(0)
 
         print(
             f"[Control] Cockpit {cockpit_id}: "
