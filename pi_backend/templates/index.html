@@ -373,6 +373,22 @@ function renderCockpits(data) {
                            class="w-full accent-red-600">
                 </div>
 
+                <div>
+                    <div class="flex justify-between text-[11px] text-zinc-500 uppercase mt-4 mb-1">
+                        <span>Haptic Force</span>
+                        <span id="haptic-val-${cockpit.cockpit_id}" class="text-red-500">
+                            ${escapeHtml(settings.haptic_scale ?? 100)}%
+                        </span>
+                    </div>
+
+                    <input type="range"
+                           id="haptic-${cockpit.cockpit_id}"
+                           min="0" max="100" step="5"
+                           value="${escapeHtml(settings.haptic_scale ?? 100)}"
+                           oninput="updateHapticLabel(${cockpit.cockpit_id})"
+                           class="w-full accent-red-600">
+                </div>
+                
                 <div class="flex items-center justify-between mt-4 mb-2">
                     <span class="text-[11px] text-zinc-500 uppercase">Auto-Center</span>
                     <label class="relative inline-flex items-center cursor-pointer">
@@ -442,6 +458,11 @@ function updateSensitivityLabel(cockpitId) {
 function updateThrottleLabel(cockpitId) {
     const value = document.getElementById(`throttle-${cockpitId}`).value;
     document.getElementById(`throttle-val-${cockpitId}`).innerText = `${value}%`;
+}
+
+function updateHapticLabel(cockpitId) {
+    const value = document.getElementById(`haptic-${cockpitId}`).value;
+    document.getElementById(`haptic-val-${cockpitId}`).innerText = `${value}%`;
 }
 
 async function refreshCockpits() {
@@ -567,12 +588,14 @@ async function saveCockpitSettings(cockpitId) {
         const duration = document.getElementById(`duration-${cockpitId}`).value;
         const sensitivity = document.getElementById(`sens-${cockpitId}`).value;
         const throttle = document.getElementById(`throttle-${cockpitId}`).value;
+        const haptic = document.getElementById(`haptic-${cockpitId}`) ? document.getElementById(`haptic-${cockpitId}`).value : 100;
         const autocenterElem = document.getElementById(`autocenter-${cockpitId}`);
 
         const payload = {
             session_duration_minutes: Number(duration),
             steering_sensitivity: Number(sensitivity),
-            throttle_sensitivity: Number(throttle)
+            throttle_sensitivity: Number(throttle),
+            haptic_scale: Number(haptic)
         };
         if (autocenterElem) {
             payload.autocenter_enabled = autocenterElem.checked;

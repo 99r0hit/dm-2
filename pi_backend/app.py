@@ -511,25 +511,22 @@ def handle_telemetry_impact(impact):
         f"vehicle={matched_vehicle_name} | jerk={jerk:.1f}"
     )
 
+    cockpit = cockpit_manager.get_cockpit(matched_cockpit_id)
+    with cockpit_settings_lock:
+        settings = dict(cockpit_settings[matched_cockpit_id])
+    scale = settings.get("haptic_scale", 100) / 100.0
+
     if effect_type == "kick":
         severity = jerk / 50.0
-        strength = min(100.0, max(20.0, severity * 100.0))
-        # Use play_rumble to ensure it actually vibrates instead of just being stiff
-        if hasattr(ffb, 'play_rumble'):
-            ffb.play_rumble(500)
-        else:
-            try:
-                ffb.set_hardware_autocenter(strength)
-            except Exception: pass
-            timer = threading.Timer(FFB_KICK_DURATION, _release_cockpit_impact_ffb, args=(matched_cockpit_id,))
-            timer.daemon = True
-            timer.start()
+        strength = min(FFB_MAX, max(FFB_MIN, severity * FFB_MULTIPLIER)) * scale
+        if hasattr(ffb, 'play_kick'):
+            ffb.play_kick(strength, 250)
     elif effect_type == "terrain":
         if hasattr(ffb, 'play_terrain'):
-            ffb.play_terrain(500)
+            ffb.play_terrain(500, scale=scale)
     elif effect_type == "rumble":
         if hasattr(ffb, 'play_rumble'):
-            ffb.play_rumble(500)
+            ffb.play_rumble(500, scale=scale)
 
 
 
@@ -605,7 +602,7 @@ def _remove_cockpit_ffb_instance(cockpit_id, expected=None):
 
 def set_autocenter_hardware(enabled: bool, cockpit_id=None):
     """Set hardware centering for one cockpit, or all active cockpit wheels."""
-    strength = 0
+    strength = 22 if enabled else 0
     print(f"Sagar")
 
     if cockpit_id is not None:
@@ -1295,7 +1292,7 @@ def cockpit_control_worker(cockpit_id):
             if cockpit_id in cockpit_settings:
                 enabled = cockpit_settings[cockpit_id].get("autocenter_enabled", True)
         
-        ffb.set_hardware_autocenter(0)
+        ffb.set_hardware_autocenter(22 if enabled else 0)
 
         print(
             f"[Control] Cockpit {cockpit_id}: "
