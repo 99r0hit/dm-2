@@ -126,11 +126,17 @@ class G29FFB:
         def _kick():
             self._effect_playing = True
             try:
-                self.set_hardware_autocenter(strength, _internal=True)
+                if self.rumble_effect_id >= 0:
+                    mag = 0x7FFF # Max magnitude for kick
+                    self.rumble_effect_id = self._update_effect_magnitude(self.rumble_effect_id, 40, mag)
+                    self.dev.write(ecodes.EV_FF, self.rumble_effect_id, 1)
                 time.sleep(duration_ms / 1000.0)
             finally:
+                if self.rumble_effect_id >= 0:
+                    try:
+                        self.dev.write(ecodes.EV_FF, self.rumble_effect_id, 0)
+                    except Exception: pass
                 self._effect_playing = False
-                self.set_hardware_autocenter(self._last_autocenter, _internal=True)
         threading.Thread(target=_kick, daemon=True).start()
 
     def play_rumble(self, duration_ms=1000, scale=1.0):
