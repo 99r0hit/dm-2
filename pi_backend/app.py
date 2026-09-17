@@ -26,6 +26,7 @@ autocenter_enabled = True
 # Start background Wi-Fi connection monitor
 threading.Thread(target=monitor_wifi, daemon=True).start()
 
+
 # Legacy/global vehicle control settings retained for the existing drive loop.
 # Per-cockpit settings are stored separately below and are exposed through
 # the cockpit API. The actual multi-cockpit drive loop will use these later
@@ -46,6 +47,9 @@ start_time = time.time()
 # wheel device owned by that cockpit's control worker.
 cockpit_ffb_instances = {}
 cockpit_ffb_lock = threading.Lock()
+
+esp_ffb_instances = {}
+esp_ffb_lock = threading.Lock()
 
 # Telemetry receiver: RX identity + impact detection + per-cockpit FFB routing.
 
@@ -237,6 +241,11 @@ COCKPIT_SETTINGS_FILE = os.path.join(
     "cockpit_settings.json"
 )
 
+ESP_COCKPIT_SETTINGS_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    "esp_cockpit_settings.json"
+)
+
 cockpit_sessions_lock = threading.Lock()
 cockpit_sessions = {
     cockpit_id: {
@@ -288,6 +297,191 @@ FFB_MIN = 30.0
 FFB_MAX = 100.0
 FFB_MULTIPLIER = 50.0
 FFB_KICK_DURATION = 0.25
+
+def start_esp_cockpit_session(cockpit_id):
+
+    reconcile_esp_devices
+    with esp_cockpit_sessions_lock:
+        session = esp_cockpit_sessions[cockpit_id]
+
+        if session["active"]:
+            return False, "Session already active"
+
+        duration_minutes = esp_cockpit_settings[cockpit_id][
+            "session_duration_minutes"
+        ]
+
+        now = time.time()
+        ends_at = now + (duration_minutes * 60)
+
+        esp_cockpit_sessions[cockpit_id] = {
+            "active": True,
+            "started_at": now,
+            "ends_at": ends_at,
+        }
+
+    print(
+        f"[ESP{cockpit_id}] SESSION_STARTED:"
+        f"{duration_minutes * 60}s"
+    )
+
+    return True, None
+
+
+def stop_esp_cockpit_session(cockpit_id):
+    with esp_cockpit_sessions_lock:
+        esp_cockpit_sessions[cockpit_id] = {
+            "active": False,
+            "started_at": None,
+            "ends_at": None,
+        }
+
+    print(f"[ESP{cockpit_id}] SESSION_STOPPED")
+
+    with esp_cockpits_lock:
+        esp = esp_cockpits[cockpit_id]["esp"]
+
+    if esp is not None:
+        try:
+            esp.send_control(
+                _esp_throttle_to_dac(0),
+                _esp_steering_to_dac(0)
+            )
+        except Exception:
+            pass
+
+    return True, None
+
+
+def esp_cockpit_session_worker():
+    """Background timer for ESP cockpit sessions."""
+
+    while True:
+        now = time.time()
+        expired = []
+
+        with esp_cockpit_sessions_lock:
+            for cockpit_id, session in esp_cockpit_sessions.items():
+                if (
+                    session["active"]
+                    and session["ends_at"] is not None
+                    and now >= session["ends_at"]
+                ):
+                    expired.append(cockpit_id)
+
+        for cockpit_id in expired:
+            print(
+                f"[ESP Session] Cockpit {cockpit_id} expired"
+            )
+            stop_esp_cockpit_session(cockpit_id)
+
+        time.sleep(0.25)
+
+threading.Thread(
+    target=esp_cockpit_session_worker,
+    daemon=True
+).start()
+
+def get_esp_cockpit_session_state(cockpit_id):
+    now = time.time()
+
+    with esp_cockpit_sessions_lock:
+        session = esp_cockpit_sessions[cockpit_id]
+
+        if session["active"] and session["ends_at"] is not None:
+            remaining = max(
+                0,
+                int(session["ends_at"] - now)
+            )
+        else:
+            remaining = 0
+
+        return {
+            "active": bool(session["active"]),
+            "remaining_seconds": remaining
+        }
+
+def start_esp_cockpit_session(cockpit_id):
+    """Start a timed session for one ESP cockpit."""
+
+    if cockpit_id not in esp_cockpits:
+        return False, "Invalid ESP cockpit ID"
+
+    with esp_cockpits_lock:
+        cockpit = esp_cockpits[cockpit_id]
+        wheel = cockpit["wheel"]
+        esp = cockpit["esp"]
+
+    if wheel is None:
+        return False, f"ESP Cockpit {cockpit_id} has no wheel connected"
+
+    if esp is None:
+        return False, f"ESP Cockpit {cockpit_id} has no ESP32 connected"
+
+    if esp.serial is None or not esp.serial.is_open:
+        return False, f"ESP Cockpit {cockpit_id} ESP32 serial is not open"
+
+    with esp_cockpit_sessions_lock:
+        if esp_cockpit_sessions[cockpit_id]["active"]:
+            return False, f"ESP Cockpit {cockpit_id} session is already active"
+
+    with esp_cockpit_settings_lock:
+        duration_minutes = esp_cockpit_settings[cockpit_id][
+            "session_duration_minutes"
+        ]
+
+    now = time.time()
+    duration_seconds = int(duration_minutes * 60)
+    ends_at = now + duration_seconds
+
+    # Send neutral control before allowing the session to run.
+    try:
+        esp.send_control(124, 128)
+    except Exception as e:
+        return False, f"ESP32 neutral command failed: {e}"
+
+    with esp_cockpit_sessions_lock:
+        esp_cockpit_sessions[cockpit_id] = {
+            "active": True,
+            "started_at": now,
+            "ends_at": ends_at,
+        }
+
+    print(
+        f"[ESP Session] Cockpit {cockpit_id} started: "
+        f"{duration_minutes} minute(s), Car {cockpit_id}"
+    )
+
+    return True, None
+
+def stop_esp_cockpit_session(cockpit_id):
+    """Stop an ESP session and force neutral output."""
+
+    if cockpit_id not in esp_cockpits:
+        return False, "Invalid ESP cockpit ID"
+
+    with esp_cockpits_lock:
+        esp = esp_cockpits[cockpit_id]["esp"]
+
+    # Always force neutral when stopping.
+    if esp is not None:
+        try:
+            esp.send_control(124, 128)
+        except Exception as e:
+            print(
+                f"[ESP Session] Cockpit {cockpit_id} neutral warning: {e}"
+            )
+
+    with esp_cockpit_sessions_lock:
+        esp_cockpit_sessions[cockpit_id] = {
+            "active": False,
+            "started_at": None,
+            "ends_at": None,
+        }
+
+    print(f"[ESP Session] Cockpit {cockpit_id} stopped")
+
+    return True, None
 
 def _load_cockpit_settings():
     """Load persistent per-cockpit settings from disk."""
@@ -365,6 +559,27 @@ def _load_cockpit_settings():
     except Exception as exc:
         print(f"[Cockpit Settings] Load error: {exc}")
 
+
+def _save_esp_cockpit_settings():
+    try:
+        with esp_cockpit_settings_lock:
+            data = {
+                str(cockpit_id): dict(settings)
+                for cockpit_id, settings in esp_cockpit_settings.items()
+            }
+
+        temp_path = ESP_COCKPIT_SETTINGS_FILE + ".tmp"
+
+        with open(temp_path, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, indent=2)
+            handle.write("\n")
+
+        os.replace(temp_path, ESP_COCKPIT_SETTINGS_FILE)
+
+        print("[ESP Settings] Saved successfully")
+
+    except Exception as exc:
+        print(f"[ESP Settings] Save error: {exc}")
 
 def _save_cockpit_settings():
     """Atomically save per-cockpit settings to disk."""
@@ -546,6 +761,9 @@ COCKPIT_CONTROL_DEADZONE = 10
 cockpit_control_stop = threading.Event()
 cockpit_control_threads = {}
 
+esp_control_stop = threading.Event()
+esp_control_threads = {}
+
 # Runtime wheel hot-plug monitor. This watches for G29 connection changes
 # while Flask remains running; Nano/radio connections are not rediscovered.
 COCKPIT_DEVICE_SCAN_INTERVAL = 1.0
@@ -630,6 +848,187 @@ def drive_worker():
         is_autocenter_enabled=lambda: autocenter_enabled,
         get_haptic_settings=lambda: haptic_settings
     )
+
+
+
+@app.route('/api/esp-cockpits/<int:cockpit_id>/session/start', methods=['POST'])
+def esp_cockpit_session_start_api(cockpit_id):
+    success, error = start_esp_cockpit_session(cockpit_id)
+
+    if not success:
+        return jsonify({
+            "success": False,
+            "error": error
+        }), 400
+
+    return jsonify({
+        "success": True,
+        "cockpit_id": cockpit_id
+    })
+
+
+@app.route('/api/esp-cockpits/<int:cockpit_id>/session/stop', methods=['POST'])
+def esp_cockpit_session_stop_api(cockpit_id):
+    success, error = stop_esp_cockpit_session(cockpit_id)
+
+    if not success:
+        return jsonify({
+            "success": False,
+            "error": error
+        }), 400
+
+    return jsonify({
+        "success": True,
+        "cockpit_id": cockpit_id
+    })
+
+@app.route('/api/esp-cockpits/<int:cockpit_id>/settings', methods=['GET', 'POST'])
+def esp_cockpit_settings_api(cockpit_id):
+
+    if cockpit_id not in esp_cockpit_settings:
+        return jsonify({
+            "success": False,
+            "error": "Invalid ESP cockpit ID"
+        }), 400
+
+    if request.method == 'GET':
+        with esp_cockpit_settings_lock:
+            return jsonify({
+                "success": True,
+                "cockpit_id": cockpit_id,
+                "settings": dict(
+                    esp_cockpit_settings[cockpit_id]
+                )
+            })
+
+    data = request.get_json() or {}
+
+    with esp_cockpit_sessions_lock:
+        if esp_cockpit_sessions[cockpit_id]["active"]:
+            return jsonify({
+                "success": False,
+                "error": "Cannot change settings while session is active"
+            }), 400
+
+    with esp_cockpit_settings_lock:
+        settings = esp_cockpit_settings[cockpit_id]
+
+        if "autocenter_enabled" in data:
+            enabled = bool(data["autocenter_enabled"])
+
+            with esp_ffb_lock:
+                ffb = esp_ffb_instances.get(cockpit_id)
+
+            if ffb is not None:
+                ffb.set_hardware_autocenter(22 if enabled else 0)
+
+        if "session_duration_minutes" in data:
+            value = int(data["session_duration_minutes"])
+            if not 1 <= value <= 120:
+                return jsonify({
+                    "success": False,
+                    "error": "Session duration must be 1-120 minutes"
+                }), 400
+            settings["session_duration_minutes"] = value
+
+        if "steering_sensitivity" in data:
+            value = int(data["steering_sensitivity"])
+            if not 10 <= value <= 200:
+                return jsonify({
+                    "success": False,
+                    "error": "Steering sensitivity must be 10-200"
+                }), 400
+            settings["steering_sensitivity"] = value
+
+        if "throttle_sensitivity" in data:
+            value = int(data["throttle_sensitivity"])
+            if not 10 <= value <= 100:
+                return jsonify({
+                    "success": False,
+                    "error": "Throttle sensitivity must be 10-100"
+                }), 400
+            settings["throttle_sensitivity"] = value
+
+        if "autocenter_enabled" in data:
+            settings["autocenter_enabled"] = bool(
+                data["autocenter_enabled"]
+            )
+
+    _save_esp_cockpit_settings()
+
+    return jsonify({
+        "success": True,
+        "cockpit_id": cockpit_id,
+        "settings": dict(esp_cockpit_settings[cockpit_id])
+    })
+
+@app.route('/api/esp-cockpits', methods=['GET'])
+def esp_cockpit_status():
+    try:
+        reconcile_esp_devices()
+
+        cockpits = []
+
+        with esp_cockpits_lock:
+            device_snapshot = {
+                cockpit_id: {
+                    "wheel": cockpit["wheel"],
+                    "esp": cockpit["esp"]
+                }
+                for cockpit_id, cockpit in esp_cockpits.items()
+            }
+
+        with esp_cockpit_settings_lock:
+            settings_snapshot = {
+                cockpit_id: dict(settings)
+                for cockpit_id, settings in esp_cockpit_settings.items()
+            }
+
+        for cockpit_id in range(1, ESP_COCKPIT_COUNT + 1):
+
+            device = device_snapshot[cockpit_id]
+
+            wheel = None
+            if device["wheel"] is not None:
+                wheel = {
+                    "name": device["wheel"].name,
+                    "path": device["wheel"].path,
+                    "phys": device["wheel"].phys
+                }
+
+            esp = None
+            if device["esp"] is not None:
+                esp = {
+                    "port": device["esp"].device,
+                    "connected": bool(
+                        device["esp"].serial
+                        and device["esp"].serial.is_open
+                    )
+                }
+
+            cockpits.append({
+                "cockpit_id": cockpit_id,
+                "wheel": wheel,
+                "esp": esp,
+                "car": f"Car {cockpit_id}",
+                "settings": settings_snapshot[cockpit_id],
+                "session": get_esp_cockpit_session_state(
+                    cockpit_id
+                )
+            })
+
+        return jsonify({
+            "success": True,
+            "cockpits": cockpits
+        })
+
+    except Exception as e:
+        print(f"[ESP Cockpit API] Status error: {e}")
+
+        return jsonify({
+            "success": False,
+            "error": str(e)
+        }), 500
 
 @app.route("/telemetry_status")
 def telemetry_status():
@@ -1234,6 +1633,24 @@ def _pedal_from_event(event_value, device, code):
     return _clamp(1.0 - released_to_pressed, 0.0, 1.0)
 
 
+
+def _esp_throttle_to_dac(value):
+    value = _clamp(value, -1000, 1000)
+
+    if value >= 0:
+        return int(round(124 + (value / 1000.0) * (255 - 124)))
+
+    return int(round(124 + (value / 1000.0) * 124))
+
+
+def _esp_steering_to_dac(value):
+    value = _clamp(value, -1000, 1000)
+
+    if value >= 0:
+        return int(round(128 + (value / 1000.0) * (255 - 128)))
+
+    return int(round(128 + (value / 1000.0) * 128))
+
 def _send_cockpit_zero(radio_id):
     try:
         cockpit_manager.radio_manager.send_control(
@@ -1525,6 +1942,311 @@ def cockpit_control_worker(cockpit_id):
 
         print(f"[Control] Cockpit {cockpit_id} control worker stopped")
 
+def esp_cockpit_control_worker(cockpit_id):
+    """
+    Per-ESP-cockpit control path:
+
+        G29
+         ↓
+        session check
+         ↓
+        neutral pedal arming
+         ↓
+        sensitivity
+         ↓
+        ESP DAC mapping
+         ↓
+        USB serial
+         ↓
+        ESP32
+    """
+    ffb = None
+    print(f"[ESP{cockpit_id}] Control worker starting")
+
+    with esp_cockpits_lock:
+        cockpit = esp_cockpits.get(cockpit_id)
+
+        if not cockpit:
+            print(f"[ESP{cockpit_id}] No cockpit configuration")
+            return
+
+        wheel = cockpit["wheel"]
+        esp = cockpit["esp"]
+
+    if wheel is None:
+        print(f"[ESP{cockpit_id}] No wheel assigned")
+        return
+
+    if esp is None:
+        print(f"[ESP{cockpit_id}] No ESP controller assigned")
+        return
+
+    try:
+        wheel.grab()
+    except Exception as e:
+        print(f"[ESP{cockpit_id}] Failed to grab wheel: {e}")
+        return
+
+    # Bind FFB to this ESP cockpit's exact G29 device
+    ffb = G29FFB(wheel)
+    with esp_ffb_lock:
+        esp_ffb_instances[cockpit_id] = ffb
+
+    with esp_cockpit_settings_lock:
+        autocenter_enabled = esp_cockpit_settings[cockpit_id].get(
+            "autocenter_enabled", True
+        )
+
+    ffb.set_hardware_autocenter(22 if autocenter_enabled else 0)
+
+    steering_axis = 0.0
+    throttle_axis = 0.0
+    brake_axis = 0.0
+    real_brake_axis = 0.0
+
+    controls_armed = False
+    session_was_active = False
+    neutral_cycles = 0
+
+    NEUTRAL_PEDAL_THRESHOLD = 0.05
+    NEUTRAL_CONFIRM_CYCLES = 3
+
+    try:
+        while not esp_control_stop.is_set():
+
+            # -------------------------------------------------
+            # Read available G29 events
+            # -------------------------------------------------
+            ready, _, _ = select.select([wheel.fd], [], [], 0)
+
+            if ready:
+                for event in wheel.read():
+
+                    if event.type != evdev.ecodes.EV_ABS:
+                        continue
+
+                    if event.code == evdev.ecodes.ABS_X:
+                        steering_axis = _steering_from_event(
+                            event.value,
+                            wheel
+                        )
+
+                    elif event.code == evdev.ecodes.ABS_Z:
+                        throttle_axis = _pedal_from_event(
+                            event.value,
+                            wheel,
+                            evdev.ecodes.ABS_Z
+                        )
+
+                    elif event.code == evdev.ecodes.ABS_Y:
+                        brake_axis = _pedal_from_event(
+                            event.value,
+                            wheel,
+                            evdev.ecodes.ABS_Y
+                        )
+
+                    elif event.code == evdev.ecodes.ABS_RZ:
+                        real_brake_axis = _pedal_from_event(
+                            event.value,
+                            wheel,
+                            evdev.ecodes.ABS_RZ
+                        )
+
+            # -------------------------------------------------
+            # Check session state
+            # -------------------------------------------------
+
+            with esp_cockpit_sessions_lock:
+                session = esp_cockpit_sessions[cockpit_id]
+                session_active = session["active"]
+                session_ends_at = session["ends_at"]
+
+            # Check automatic session expiry
+            if (
+                session_active
+                and session_ends_at is not None
+                and time.time() >= session_ends_at
+            ):
+                with esp_cockpit_sessions_lock:
+                    esp_cockpit_sessions[cockpit_id] = {
+                        "active": False,
+                        "started_at": None,
+                        "ends_at": None,
+                    }
+
+                print(f"[ESP{cockpit_id}] SESSION_EXPIRED")
+
+                session_active = False
+
+            if not session_active:
+
+                controls_armed = False
+                session_was_active = False
+                neutral_cycles = 0
+
+                esp.send_control(
+                    _esp_throttle_to_dac(0),
+                    _esp_steering_to_dac(0)
+                )
+
+                time.sleep(COCKPIT_CONTROL_INTERVAL)
+                continue
+
+            # -------------------------------------------------
+            # New session → reset arming
+            # -------------------------------------------------
+            if not session_was_active:
+
+                controls_armed = False
+                neutral_cycles = 0
+                session_was_active = True
+
+            # -------------------------------------------------
+            # Pedal neutral arming
+            # -------------------------------------------------
+            if not controls_armed:
+
+                pedals_neutral = (
+                    abs(throttle_axis) <= NEUTRAL_PEDAL_THRESHOLD
+                    and abs(brake_axis) <= NEUTRAL_PEDAL_THRESHOLD
+                    and abs(real_brake_axis) <= NEUTRAL_PEDAL_THRESHOLD
+                )
+
+                if pedals_neutral:
+                    neutral_cycles += 1
+                else:
+                    neutral_cycles = 0
+
+                if neutral_cycles >= NEUTRAL_CONFIRM_CYCLES:
+                    controls_armed = True
+
+                # Stay neutral until successfully armed
+                esp.send_control(
+                    _esp_throttle_to_dac(0),
+                    _esp_steering_to_dac(0)
+                )
+
+                time.sleep(COCKPIT_CONTROL_INTERVAL)
+                continue
+
+            # -------------------------------------------------
+            # Get cockpit sensitivity settings
+            # -------------------------------------------------
+            with esp_cockpit_settings_lock:
+                settings = dict(
+                    esp_cockpit_settings[cockpit_id]
+                )
+
+            steering_sensitivity = (
+                settings["steering_sensitivity"] / 100.0
+            )
+
+            throttle_sensitivity = (
+                settings["throttle_sensitivity"] / 100.0
+            )
+
+            # -------------------------------------------------
+            # Steering
+            # Same calculation as RF cockpit
+            # -------------------------------------------------
+            steering = int(_clamp(
+                steering_axis
+                * COCKPIT_CONTROL_SCALE
+                * steering_sensitivity,
+                -COCKPIT_CONTROL_SCALE,
+                COCKPIT_CONTROL_SCALE
+            ))
+
+            # -------------------------------------------------
+            # Throttle
+            # Same calculation as RF cockpit
+            # -------------------------------------------------
+            throttle = int(_clamp(
+                (throttle_axis - brake_axis)
+                * COCKPIT_CONTROL_SCALE
+                * throttle_sensitivity,
+                -COCKPIT_CONTROL_SCALE,
+                COCKPIT_CONTROL_SCALE
+            ))
+
+            # -------------------------------------------------
+            # Deadzone
+            # -------------------------------------------------
+            if abs(throttle) < COCKPIT_CONTROL_DEADZONE:
+                throttle = 0
+
+            # -------------------------------------------------
+            # Real brake safety
+            # -------------------------------------------------
+            if real_brake_axis > 0.05:
+                throttle = 0
+
+            # -------------------------------------------------
+            # Convert to ESP DAC values and send
+            # -------------------------------------------------
+            esp.send_control(
+                _esp_throttle_to_dac(throttle),
+                _esp_steering_to_dac(steering)
+            )
+
+            time.sleep(COCKPIT_CONTROL_INTERVAL)
+
+    except Exception as e:
+        print(f"[ESP{cockpit_id}] Control worker error: {e}")
+
+    finally:
+
+        try:
+            ffb.stop()
+        except Exception:
+            pass
+
+        with esp_ffb_lock:
+            if esp_ffb_instances.get(cockpit_id) is ffb:
+                esp_ffb_instances.pop(cockpit_id, None)
+
+        # Always return ESP to neutral on worker exit
+        try:
+            esp.send_control(
+                _esp_throttle_to_dac(0),
+                _esp_steering_to_dac(0)
+            )
+        except Exception:
+            pass
+
+        try:
+            wheel.ungrab()
+        except Exception:
+            pass
+
+        print(f"[ESP{cockpit_id}] Control worker stopped")
+
+def start_esp_cockpit_control_worker(cockpit_id):
+    if cockpit_id in esp_control_threads:
+        thread = esp_control_threads[cockpit_id]
+        if thread.is_alive():
+            return
+
+    esp_control_stop.clear()
+
+    thread = threading.Thread(
+        target=esp_cockpit_control_worker,
+        args=(cockpit_id,),
+        name=f"esp{cockpit_id}-control",
+        daemon=True
+    )
+
+    esp_control_threads[cockpit_id] = thread
+    thread.start()
+
+def stop_esp_cockpit_control_workers():
+    esp_control_stop.set()
+
+    for thread in esp_control_threads.values():
+        if thread is not None:
+            thread.join(timeout=2.0)
+
+    esp_control_threads.clear()
 
 def start_cockpit_control_worker(cockpit_id):
     if cockpit_id in cockpit_control_threads:
@@ -2516,6 +3238,11 @@ def ffb_test_api():
 if __name__ == '__main__':
     initialize_cockpit_system()
 
+    reconcile_esp_devices()
+
+    for cockpit_id in range(1, ESP_COCKPIT_COUNT + 1):
+        start_esp_cockpit_control_worker(cockpit_id)
+
     # Telemetry reception, impact detection and validated G29 impact FFB.
     telemetry_receiver.start()
 
@@ -2544,4 +3271,5 @@ if __name__ == '__main__':
         telemetry_receiver.stop()
         stop_cockpit_device_monitor()
         stop_cockpit_control_workers()
+        stop_esp_cockpit_control_workers()
         cockpit_manager.close()
