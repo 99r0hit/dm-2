@@ -10,17 +10,5 @@
     "steering_sensitivity": 100,
     "throttle_sensitivity": 100,
     "autocenter_enabled": true
-  },
-  "3": {
-    "session_duration_minutes": 10,
-    "steering_sensitivity": 100,
-    "throttle_sensitivity": 100,
-    "autocenter_enabled": true
-  },
-  "4": {
-    "session_duration_minutes": 10,
-    "steering_sensitivity": 100,
-    "throttle_sensitivity": 100,
-    "autocenter_enabled": true
   }
 }
